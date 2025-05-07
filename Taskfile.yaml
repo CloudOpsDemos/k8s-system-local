@@ -1,0 +1,119 @@
+version: '3'
+
+vars:
+  cluster_name: '{{ default "control-plane" .cluster_name }}'
+  container_runtime: '{{default "docker" .container_runtime}}'
+  timeout: '{{default 60 .timeout}}' # Timeout in seconds
+
+tasks:
+  c: # Create Development Environment
+    desc: "Set up development environment"
+    cmds:
+      - task setup # Ensure kind and kubectl are installed
+      - task control-plane # Create control plane cluster
+      - task crossplane # Install and configure Crossplane
+      - task argocd # Install and configure ArgoCD
+
+  setup:
+    desc: "Ensure kind and kubectl are installed and ready to use"
+    cmds:
+      - |
+        if ! command -v kind &> /dev/null; then
+          echo "Kind is not installed. Installing kind..."
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+        else
+          echo "Kind is already installed."
+        fi
+      - |
+        if ! command -v kubectl &> /dev/null; then
+          echo "Kubectl is not installed. Installing kubectl..."
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+        else
+          echo "Kubectl is already installed."
+        fi
+      - |
+        if ! command -v {{.container_runtime}} &> /dev/null; then
+          echo "{{.container_runtime}} is not installed."
+          exit 1
+        else
+          echo -e "{{.container_runtime}} is already installed:\n$({{.container_runtime}} --version)"
+        fi
+
+  control-plane: # Create Control Plane Cluster and run ArgoCD
+    desc: "Create a Kubernetes cluster using kind with Docker runtime"
+    cmds:
+      - |
+        if kind get clusters | grep -q {{.cluster_name}}
+        then
+          echo "Cluster {{.cluster_name}} already exists."
+        else
+          echo "Cluster {{.cluster_name}} does not exist. Proceeding to create it..."
+          if [[ {{.container_runtime}} == "podman" ]]; then
+            export KIND_EXPERIMENTAL_PROVIDER=podman
+          fi
+          kind create cluster --name {{.cluster_name}} --config ./kind-cluster/cluster-config.yaml --wait 2m
+        fi
+
+  crossplane:
+    desc: "Add crossplane to the cluster"
+    cmds:
+      - echo "Deploying crossplane..."
+      - |
+        helm repo add crossplane-stable https://charts.crossplane.io/stable
+        helm repo update
+
+        helm upgrade -i crossplane --namespace crossplane-system crossplane-stable/crossplane --create-namespace --wait
+        ./scripts/wait_for_resource.sh crossplane {{.timeout}} crossplane-system deployment
+
+        kubectl apply -f crossplane/provider-family-aws.yaml
+        ./scripts/wait_for_resource.sh upbound-provider-family-aws {{.timeout}} crossplane-system provider.pkg.crossplane.io
+        kubectl wait --for=condition=Healthy=True --timeout=120s provider.pkg.crossplane.io/upbound-provider-family-aws -n crossplane-system
+
+        kubectl apply -f crossplane/provider-kubernetes.yaml
+        ./scripts/wait_for_resource.sh crossplane-contrib-provider-kubernetes {{.timeout}} crossplane-system provider.pkg.crossplane.io
+        kubectl wait --for=condition=Healthy=True --timeout=120s provider.pkg.crossplane.io/crossplane-contrib-provider-kubernetes -n crossplane-system
+
+        # sops -d ./crossplane/aws-secret-enc.yaml | kubectl apply -f -
+        # ./scripts/wait_for_resource.sh aws-secret {{.timeout}} crossplane-system secret
+        # kubectl apply -f crossplane/providerconfig-aws.yaml
+
+
+      - echo "Crossplane configured successfully!"
+
+  argocd:
+    desc: "Install and configure ArgoCD in the cluster"
+    cmds:
+      - echo "Installing ArgoCD ..."
+      - |
+        # Add cred template and repository secret for ArgoCD
+        kubectl apply -f argocd/task-c/namespace.yaml
+        while ! kubectl get namespace argocd &> /dev/null; do
+          echo "Waiting for argocd namespace to be created..."
+          sleep 1
+        done
+
+        kubectl apply -f argocd/task-c/argocd-repositories.yaml
+        ./scripts/wait_for_resource.sh repo-k8s-system-local {{.timeout}} argocd secret
+
+        # sops decrypt argocd/task-c/argocd-cred-template-enc.yaml | kubectl apply -f -
+        # ./scripts/wait_for_resource.sh github-creds {{.timeout}} argocd secret
+
+        # Install and configure ArgoCD
+        kubectl apply -k argocd
+      - echo "ArgoCD installed successfully!"
+
+  dcp:
+    desc: "Delete the Kubernetes cluster"
+    vars:
+      cluster_name: '{{ default "platform" .cluster_name }}'
+    cmds:
+      - |
+        if [[ {{.container_runtime}} == "podman" ]]; then
+          export KIND_EXPERIMENTAL_PROVIDER=podman
+        fi
+        kind delete cluster --name {{.cluster_name}}
+      - echo "Cluster '{{.cluster_name}}' deleted successfully!"

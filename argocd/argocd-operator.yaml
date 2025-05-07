@@ -1,0 +1,72 @@
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: argocd-operator-job
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      serviceAccountName: operator-config-sa
+      containers:
+        - name: argocd-operator-installer
+          image: msobo1/kubectl:v0.0.1
+          command: ["/bin/bash", "-c"]
+          volumeMounts:
+            - name: argocd-operator-config
+              mountPath: /config
+          args:
+            - |
+              function check_deployment() {
+                timeout=600
+                counter=0
+                namespace="$1"
+                resource="$2"
+                while [ $counter -le $timeout ]
+                do
+                  if kubectl rollout status -n ${namespace} deployment/${resource} > /dev/null 2>&1;
+                  then
+                    echo " ${resource} is ready!"
+                    break
+                  else
+                    sleep 3
+                    counter=$((counter + 3))
+                    printf "..."
+                    if [ $counter -eq $timeout ]; then
+                      echo ""
+                      echo "Error: ${resource} deployment failed or is taking too long to become ready."
+                      exit 1
+                    fi
+                  fi
+                done
+              }
+              curl -sL https://github.com/operator-framework/operator-lifecycle-manager/releases/download/v0.32.0/install.sh | bash -s v0.32.0
+              kubectl wait -n olm --for=condition=available=true deployment/olm-operator --timeout=300s \
+              && echo "OLM Operator is ready!"
+              kubectl wait -n olm --for=condition=available=true deployment/catalog-operator --timeout=300s \
+              && echo "Catalog Operator is ready!"
+              kubectl wait -n olm --for=condition=available=true deployment/packageserver --timeout=300s \
+              && echo "Package Server is ready!"
+
+              kubectl apply -f /config/argocd-clusterscoped-instance.yaml
+              check_deployment operators argocd-operator-controller-manager
+
+              kubectl apply -f /config/argocd.yaml
+              check_deployment argocd argocd-repo-server
+              check_deployment argocd argocd-server
+              kubectl apply -f /config/argocd-clusterscoped-instance.yaml
+
+              kubectl apply -f /config/argocd-cm-project-apps.yaml
+              kubectl apply -f /config/argocd-cm-project-default.yaml
+              kubectl apply -f /config/argocd-cm-project-system-applications.yaml
+              echo "ArgoCD Operator and ArgoCD resources have been successfully applied."
+
+              kubectl apply -f /config/app-of-apps.yaml
+
+      restartPolicy: OnFailure
+      volumes:
+        - name: argocd-operator-config
+          configMap:
+            name: argocd-operator-config
+  backoffLimit: 4
+  completions: 1
+  parallelism: 1

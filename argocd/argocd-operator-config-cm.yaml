@@ -1,0 +1,143 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: argocd-operator-config
+  namespace: kube-system
+data:
+  argocd.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: ArgoCD
+    metadata:
+      name: argocd
+      namespace: argocd
+    spec:
+      extraConfig:
+          resource.customizations.health.argoproj.io_Application: |
+            hs = {}
+            hs.status = "Progressing"
+            hs.message = ""
+            if obj.status ~= nil then
+              if obj.status.health ~= nil then
+                hs.status = obj.status.health.status
+                if obj.status.health.message ~= nil then
+                  hs.message = obj.status.health.message
+                end
+              end
+            end
+            return hs
+  argocd-clusterscoped-instance.yaml: |
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: Subscription
+    metadata:
+      name: argocd-operator
+      namespace: operators
+    spec:
+      config:
+        env:
+          - name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
+            value: argocd
+      channel: alpha
+      name: argocd-operator
+      source: operatorhubio-catalog
+      sourceNamespace: olm
+  app-of-apps.yaml: |
+    kind: Application
+    apiVersion: argoproj.io/v1alpha1
+    metadata:
+      name: app-of-apps
+      namespace: argocd
+      annotations:
+        argocd.argoproj.io/sync-wave: "-5"
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: system-applications
+      source:
+        repoURL: https://github.com/CloudOpsDemos/k8s-system-local.git
+        targetRevision: main
+        path: ./argocd/apps
+      destination:
+        server: 'https://kubernetes.default.svc'
+        namespace: argocd
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: true
+        syncOptions:
+          - CreateNamespace=true
+      revisionHistoryLimit: 10
+  argocd-cm-project-apps.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: AppProject
+    metadata:
+      name: apps
+      namespace: argocd
+    spec:
+      clusterResourceWhitelist:
+        - group: "*"
+          kind: "*"
+      description: User Applications
+      destinations:
+        - name: 'in-cluster'
+          namespace: '*'
+          server: https://kubernetes.default.svc
+      sourceRepos:
+        - '*'
+  argocd-cm-project-default.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: AppProject
+    metadata:
+      name: default
+      namespace: argocd
+    spec:
+      sourceRepos: []
+      sourceNamespaces: []
+      destinations: []
+      description: Disabled
+      namespaceResourceBlacklist:
+      - group: '*'
+        kind: '*'
+  argocd-cm-project-system-applications.yaml: |
+    apiVersion: argoproj.io/v1alpha1
+    kind: AppProject
+    metadata:
+      name: system-applications
+      namespace: argocd
+    spec:
+      clusterResourceWhitelist:
+        - group: "*"
+          kind: "*"
+      description: System Applications
+      destinations:
+        - name: 'in-cluster'
+          namespace: '*'
+          server: https://kubernetes.default.svc
+      sourceRepos:
+        - '*'
+  argocd-repo-server-rbac.yaml: |
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: argocd-repo-server-configmap-access
+      namespace: argocd
+    rules:
+      - apiGroups: [""]
+        resources: ["configmaps"]
+        resourceNames: ["argocd-cm-system-applications"]
+        verbs: ["get", "list", "create", "update", "delete"]
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: argocd-repo-server-configmap-binding
+      namespace: argocd
+    subjects:
+      - kind: ServiceAccount
+        name: argocd-repo-server
+        namespace: argocd
+    roleRef:
+      kind: Role
+      name: argocd-repo-server-configmap-access
+      apiGroup: rbac.authorization.k8s.io

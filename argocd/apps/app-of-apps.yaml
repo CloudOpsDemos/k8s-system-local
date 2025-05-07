@@ -1,0 +1,26 @@
+kind: Application
+apiVersion: argoproj.io/v1alpha1
+metadata:
+  name: app-of-apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: system-applications
+  source:
+    repoURL: https://github.com/CloudOpsDemos/k8s-system-local.git
+    targetRevision: main
+    path: ./argocd/apps
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: true
+    syncOptions:
+      - CreateNamespace=true
+  revisionHistoryLimit: 10

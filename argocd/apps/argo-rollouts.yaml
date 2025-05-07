@@ -1,0 +1,33 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/app-name: argo-rollouts
+    argocd.argoproj.io/managed-by: argocd
+    argocd.argoproj.io/part-of: system-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: system-applications
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    targetRevision: 2.39.6
+    chart: argo-rollouts
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+      - ApplyOutOfSyncOnly=true
+  revisionHistoryLimit: 5
